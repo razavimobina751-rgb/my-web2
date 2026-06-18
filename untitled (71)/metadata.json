@@ -1,0 +1,6 @@
+{
+  "name": "Mingde Tianfang Library",
+  "description": "A scholarly sanctuary presenting cinematic cultural short and long video collections, exquisite Sini and Chinese calligraphy galleries, and historical Silk Road dialog archives.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

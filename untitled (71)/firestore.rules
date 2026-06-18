@@ -1,0 +1,211 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Catch-All Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- REUSABLE PRIMITIVES & IDENTITY HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && (
+        request.auth.token.email_verified == true || 
+        request.auth.token.email == "arshsmyh557@gmail.com"
+      );
+    }
+
+    // Role-based lookup helpers from /users/{userId} collection
+    function getUserRole(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.role;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "arshsmyh557@gmail.com" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         getUserRole(request.auth.uid) == "super_admin")
+      );
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == "arshsmyh557@gmail.com" ||
+        isSuperAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         getUserRole(request.auth.uid) == "admin")
+      );
+    }
+
+    function isEditor() {
+      return isSignedIn() && (
+        request.auth.token.email == "arshsmyh557@gmail.com" ||
+        isAdmin() ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         getUserRole(request.auth.uid) == "editor")
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // --- VALIDATION BLUEPRINTS (THE ANTI-UPDATE-GAPS) ---
+    function isValidUser(u) {
+      return u.uid is string && u.uid.size() <= 128 &&
+             u.email is string && u.email.size() <= 128 &&
+             u.role is string && (u.role == "super_admin" || u.role == "admin" || u.role == "editor" || u.role == "viewer");
+    }
+
+    function isValidVideo(v) {
+      return v.id is string && v.id.size() <= 128 &&
+             v.slug is string && v.slug.size() <= 128 &&
+             v.title is string && v.title.size() <= 200 &&
+             v.description is string && v.description.size() <= 5000 &&
+             v.videoUrl is string && v.videoUrl.size() <= 1000 &&
+             v.posterUrl is string && v.posterUrl.size() <= 1000 &&
+             v.category is string && v.category.size() <= 128;
+    }
+
+    function isValidArticle(a) {
+      return a.id is string && a.id.size() <= 128 &&
+             a.slug is string && a.slug.size() <= 128 &&
+             a.title is string && a.title.size() <= 200 &&
+             a.content is string && a.content.size() <= 100000 &&
+             a.summary is string && a.summary.size() <= 2000 &&
+             a.coverUrl is string && a.coverUrl.size() <= 1000 &&
+             a.category is string && a.category.size() <= 128;
+    }
+
+    function isValidCategory(c) {
+      return c.id is string && c.id.size() <= 128 &&
+             c.name is string && c.name.size() <= 100 &&
+             c.slug is string && c.slug.size() <= 128 &&
+             c.type is string && (c.type == "video" || c.type == "article" || c.type == "both");
+    }
+
+    function isValidActivityLog(l) {
+      return l.id is string && l.id.size() <= 128 &&
+             l.userId is string && l.userId == request.auth.uid &&
+             l.userEmail is string && l.userEmail == request.auth.token.email &&
+             l.action is string && l.action.size() <= 200;
+    }
+
+    function isValidInquiry(i) {
+      return i.name is string && i.name.size() <= 200 &&
+             i.email is string && i.email.size() <= 256 &&
+             i.topic is string && i.topic.size() <= 128 &&
+             i.message is string && i.message.size() <= 10000 &&
+             i.timestamp is string && i.timestamp.size() <= 128;
+    }
+
+    function isValidSiteSettings(s) {
+      return s.id is string && s.id.size() <= 128;
+    }
+
+
+    // --- SECURITY RULE MATCH BLOCKS ---
+
+    // USERS COLLECTION
+    match /users/{userId} {
+      // Users can get their own info, or admins can inspect users
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      // Users can list profiles, but only admins or super_admins
+      allow list: if isAdmin();
+
+      // Creation constraint: New user is either arshsmyh557 or forced to standard "viewer"/"editor" depending on first user
+      allow create: if isSignedIn() && request.auth.uid == userId && isValidUser(incoming()) && (
+        (request.auth.token.email == "arshsmyh557@gmail.com" && incoming().role == "super_admin") ||
+        (incoming().role == "viewer" || incoming().role == "editor")
+      );
+
+      // Update rules: regular users can edit their profile info but NOT elevate their role. Admins/Super-admins can edit everything.
+      allow update: if isSignedIn() && isValidUser(incoming()) && (
+        // Self-update without mutating immutable role fields
+        (request.auth.uid == userId && incoming().role == existing().role) ||
+        // Super Admin or Admin updating other accounts
+        (isSuperAdmin() || (isAdmin() && existing().role != "super_admin" && incoming().role != "super_admin"))
+      );
+
+      // Only Super Admins can delete users
+      allow delete: if isSuperAdmin();
+    }
+
+    // VIDEOS COLLECTION
+    match /videos/{videoId} {
+      allow get, list: if true; // Public access to reading videos
+
+      allow create: if isEditor() && isEmailVerified() && isValidVideo(incoming()) && isValidId(videoId) &&
+                    (!exists(/databases/$(database)/documents/categories/$(incoming().category)) || true);
+
+      allow update: if isEditor() && isEmailVerified() && isValidVideo(incoming()) && isValidId(videoId);
+
+      allow delete: if isAdmin() && isEmailVerified();
+    }
+
+    // ARTICLES COLLECTION
+    match /articles/{articleId} {
+      allow get, list: if true; // Public access to reading articles
+
+      allow create: if isEditor() && isEmailVerified() && isValidArticle(incoming()) && isValidId(articleId);
+
+      allow update: if isEditor() && isEmailVerified() && isValidArticle(incoming()) && isValidId(articleId);
+
+      allow delete: if isAdmin() && isEmailVerified();
+    }
+
+    // CATEGORIES COLLECTION
+    match /categories/{categoryId} {
+      allow get, list: if true; // Public access to reading categories
+
+      allow create: if isEditor() && isEmailVerified() && isValidCategory(incoming()) && isValidId(categoryId);
+
+      allow update: if isEditor() && isEmailVerified() && isValidCategory(incoming()) && isValidId(categoryId);
+
+      allow delete: if isAdmin() && isEmailVerified();
+    }
+
+    // ACTIVITY LOGS COLLECTION (System logs)
+    match /activity_logs/{logId} {
+      // Only admins and super admins can view logs
+      allow get, list: if isAdmin();
+      
+      // All authenticated users can log activities, but MUST match their own credentials
+      allow create: if isSignedIn() && isValidActivityLog(incoming()) && isValidId(logId);
+      
+      // System logs are immutable, deletion and updating is strictly forbidden
+      allow update, delete: if false;
+    }
+
+    // INQUIRIES COLLECTION
+    match /inquiries/{inquiryId} {
+      // Direct access allowed for administrators and system operations
+      allow get, list: if isAdmin();
+      
+      // Public submissions of inquiry form, strictly validated
+      allow create: if isValidInquiry(incoming()) && isValidId(inquiryId);
+      
+      // Inquiries are immutable and non-deletable
+      allow update, delete: if false;
+    }
+
+    // SETTINGS COLLECTION
+    match /settings/{settingsId} {
+      allow get, list: if true;
+      allow create, update: if isEditor() && isEmailVerified() && isValidSiteSettings(incoming()) && isValidId(settingsId);
+      allow delete: if isAdmin() && isEmailVerified();
+    }
+  }
+}
